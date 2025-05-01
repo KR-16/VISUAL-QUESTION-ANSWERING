@@ -1,130 +1,98 @@
 import streamlit as st
 import numpy as np
-from PIL import Image
 import tensorflow as tf
-from tensorflow.keras.models import load_model
-from tensorflow.keras.preprocessing.image import img_to_array
-from tensorflow.keras.applications.vgg16 import preprocess_input
-import pickle
-import os
+from tensorflow import keras
+from easy_vqa import get_test_questions, get_test_image_paths
+from tensorflow.keras.preprocessing.image import load_img, img_to_array
+from tensorflow.keras.preprocessing.text import Tokenizer
+from tensorflow.keras.preprocessing.sequence import pad_sequences
+import matplotlib.pyplot as plt
+from PIL import Image
 
-# Set page config
-st.set_page_config(page_title="Visual Question Answering", layout="wide")
-
-# Load necessary components (cache to avoid reloading)
+# Load the trained model
 @st.cache_resource
-def load_vqa_model():
-    try:
-        model = load_model('model.h5')
-        return model
-    except Exception as e:
-        st.error(f"Error loading model.h5: {str(e)}")
-        return None
+def load_model():
+    return keras.models.load_model('model.h5')
 
-@st.cache_resource
-def load_tokenizer():
-    try:
-        with open('tokenizer.pkl', 'rb') as f:
-            tokenizer = pickle.load(f)
-        return tokenizer
-    except:
-        st.error("Could not load tokenizer.pkl")
-        return None
-
+# Load tokenizer and answers list
 @st.cache_data
-def load_answer_classes():
-    try:
-        with open('answer_classes.pkl', 'rb') as f:
-            answer_classes = pickle.load(f)
-        return answer_classes
-    except:
-        st.error("Could not load answer_classes.pkl")
-        return None
+def load_tokenizer_and_answers():
+    from easy_vqa import get_answers
+    answers_list = get_answers()
+    
+    # Create tokenizer (same as in notebook)
+    tokenizer = Tokenizer(num_words=35, oov_token='<OOV>')
+    train_questions, _, _ = get_test_questions()  # Using test as we don't have train in this context
+    tokenizer.fit_on_texts(train_questions)
+    
+    return tokenizer, answers_list
 
-# Preprocess image function
-def preprocess_image(image, target_size=(224, 224)):
-    if image.mode != "RGB":
-        image = image.convert("RGB")
-    image = image.resize(target_size)
-    image = img_to_array(image)
-    image = np.expand_dims(image, axis=0)
-    image = preprocess_input(image)
-    return image
+# Load and preprocess image
+def preprocess_image(image_path):
+    img = img_to_array(load_img(image_path))
+    return img / 255.0
 
-# Preprocess question function
-def preprocess_question(question, tokenizer, max_length=30):
-    sequence = tokenizer.texts_to_sequences([question])
-    padded_sequence = tf.keras.preprocessing.sequence.pad_sequences(sequence, maxlen=max_length, padding='post')
-    return padded_sequence[0]
-
-# Main app function
+# Main app
 def main():
-    st.title("Visual Question Answering System")
-    st.write("Upload an image and ask a question about it")
+    st.title("Easy-VQA Visual Question Answering")
+    st.write("This app answers questions about simple images containing shapes and colors.")
     
-    # Load components
-    model = load_vqa_model()
-    tokenizer = load_tokenizer()
-    answer_classes = load_answer_classes()
+    # Load model and resources
+    model = load_model()
+    tokenizer, answers_list = load_tokenizer_and_answers()
     
-    if model is None or tokenizer is None or answer_classes is None:
-        st.warning("Please ensure you have the following files in your directory:")
-        st.markdown("- `model.h5` (pre-trained VQA model)")
-        st.markdown("- `tokenizer.pkl` (question tokenizer)")
-        st.markdown("- `answer_classes.pkl` (answer vocabulary)")
-        return
+    # Get test data
+    test_questions, test_answers, test_image_ids = get_test_questions()
+    test_image_paths = get_test_image_paths()
     
-    # Create two columns
-    col1, col2 = st.columns([1, 1])
+    # Create a dictionary of test images
+    test_imgs = {image_id: preprocess_image(image_path) 
+                for image_id, image_path in test_image_paths.items()}
     
-    with col1:
-        # Image upload
-        uploaded_file = st.file_uploader("Choose an image...", type=["jpg", "jpeg", "png"])
+    # Sidebar controls
+    st.sidebar.header("Controls")
+    sample_idx = st.sidebar.slider("Select a test sample", 0, len(test_questions)-1, 0)
+    
+    # Display selected sample
+    image_id = test_image_ids[sample_idx]
+    question = test_questions[sample_idx]
+    true_answer = test_answers[sample_idx]
+    
+    st.subheader("Image")
+    img_array = test_imgs[image_id]
+    st.image(img_array, width=300)
+    
+    st.subheader("Question")
+    st.write(question)
+    
+    st.subheader("True Answer")
+    st.write(true_answer)
+    
+    # Prepare input for model
+    seq = tokenizer.texts_to_sequences([question])
+    padded_seq = pad_sequences(seq, padding='post', maxlen=9)
+    img_input = np.expand_dims(test_imgs[image_id], axis=0)
+    
+    # Make prediction
+    if st.button("Predict Answer"):
+        pred = model.predict([img_input, padded_seq])
+        pred_idx = np.argmax(pred)
+        pred_answer = answers_list[pred_idx]
         
-        if uploaded_file is not None:
-            image = Image.open(uploaded_file)
-            st.image(image, caption="Uploaded Image", use_column_width=True)
-            
-            # Question input
-            question = st.text_input("Ask a question about the image:", 
-                                   placeholder="e.g. What color is the car?")
-            
-            if st.button("Get Answer") and question:
-                with st.spinner("Processing your question..."):
-                    try:
-                        # Preprocess image
-                        processed_image = preprocess_image(image)
-                        
-                        # Preprocess question
-                        processed_question = preprocess_question(question, tokenizer)
-                        processed_question = np.expand_dims(processed_question, axis=0)
-                        
-                        # Make prediction
-                        prediction = model.predict([processed_image, processed_question])
-                        predicted_idx = np.argmax(prediction)
-                        answer = answer_classes[predicted_idx]
-                        confidence = prediction[0][predicted_idx] * 100
-                        
-                        # Display result
-                        st.success(f"Answer: **{answer}** (Confidence: {confidence:.2f}%)")
-                        
-                    except Exception as e:
-                        st.error(f"Error during prediction: {str(e)}")
-    
-    with col2:
-        if uploaded_file is None:
-            st.info("Sample questions you can try after uploading an image:")
-            st.markdown("- What color is the object?")
-            st.markdown("- Is there a person in the image?")
-            st.markdown("- What is the main object in this picture?")
-            st.markdown("- How many people are in the image?")
-            st.markdown("- What type of animal is this?")
-        else:
-            st.info("VQA Model Information")
-            st.markdown(f"**Model:** {model.name}")
-            st.markdown(f"**Input shape:** {model.input_shape}")
-            st.markdown(f"**Output shape:** {model.output_shape}")
-            st.markdown(f"**Answer classes:** {len(answer_classes)} possible answers")
+        st.subheader("Predicted Answer")
+        st.write(pred_answer)
+        
+        # Show confidence
+        confidence = pred[0][pred_idx]
+        st.write(f"Confidence: {confidence:.2%}")
+        
+        # Show top 3 predictions
+        st.subheader("Top Predictions")
+        top_k = 3
+        top_indices = np.argsort(pred[0])[-top_k:][::-1]
+        
+        for i, idx in enumerate(top_indices):
+            st.write(f"{i+1}. {answers_list[idx]} ({pred[0][idx]:.2%})")
 
 if __name__ == "__main__":
     main()
